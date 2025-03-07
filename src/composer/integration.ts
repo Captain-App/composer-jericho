@@ -2,9 +2,9 @@ import * as vscode from "vscode";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { LogData } from "../types";
+import * as puppeteer from "puppeteer-core";
 import {
   clearClipboard,
-  verifyClipboardContent,
   copyImageToClipboard,
   copyTextToClipboard,
   delay,
@@ -49,194 +49,96 @@ export class ComposerIntegration {
     }
   }
 
-  public async sendToComposer(
+  private async formatLogContent(logs: LogData): Promise<string> {
+    const consoleMessages = logs.console
+      .map((log) => `[${log.type}] ${log.text}`)
+      .join("\n");
+
+    const networkMessages = logs.network
+      .map(
+        (req) =>
+          `${req.status} ${req.url}${req.error ? ` (Error: ${req.error})` : ""}`
+      )
+      .join("\n");
+
+    return `Console Logs:\n${consoleMessages}\n\nNetwork Requests:\n${networkMessages}`;
+  }
+
+  private async sendToComposer(
     screenshot?: Buffer,
     logs?: LogData
   ): Promise<void> {
-    const maxRetries = 2;
-    let imageAttempt = 0;
-    let textAttempt = 0;
-    let imageSuccess = false;
-    let textSuccess = false;
+    try {
+      await clearClipboard();
 
-    const formattedLogs = logs ? this.formatLogs(logs) : "";
-
-    while (
-      (screenshot && !imageSuccess && imageAttempt <= maxRetries) ||
-      (formattedLogs && !textSuccess && textAttempt <= maxRetries)
-    ) {
-      try {
-        await this.openComposer();
-
-        if (screenshot && !imageSuccess) {
-          await clearClipboard();
-          try {
-            await this.sendImageToComposer(screenshot);
-            await verifyClipboardContent("image");
-            imageSuccess = true;
-          } catch (err) {
-            if (imageAttempt === maxRetries) {
-              throw new Error(`Failed to send image: ${String(err)}`);
-            }
-            imageAttempt++;
-            await delay(100);
-          }
-        }
-
-        if (formattedLogs && !textSuccess) {
+      if (screenshot) {
+        const tmpFile = await this.saveScreenshotToTempFile(screenshot);
+        try {
+          await copyImageToClipboard(tmpFile);
           await delay(50);
-          await clearClipboard();
-          try {
-            await this.prepareTextForComposer(formattedLogs);
-            await verifyClipboardContent("text");
-            textSuccess = true;
-          } catch (err) {
-            if (textAttempt === maxRetries) {
-              throw new Error(`Failed to send logs: ${String(err)}`);
-            }
-            textAttempt++;
-            await delay(100);
-          }
+          await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
+          await delay(50);
+        } finally {
+          await fs.unlink(tmpFile).catch(() => {});
         }
-
-        if ((!screenshot || imageSuccess) && (!formattedLogs || textSuccess)) {
-          await this.showSuccessNotification();
-          return;
-        }
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        this.toastService.showError(
-          `Failed to send data to composer: ${errorMessage}`
-        );
-        throw error;
-      } finally {
-        this.composerOpened = false;
       }
+
+      if (logs) {
+        const content = await this.formatLogContent(logs);
+        await copyTextToClipboard(content);
+        await delay(50);
+        await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to send to composer: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
     }
   }
 
-  private async sendImageToComposer(screenshot: Buffer): Promise<void> {
+  private async saveScreenshotToTempFile(screenshot: Buffer): Promise<string> {
     const manifest = require("../../package.json");
     const extensionId = `${manifest.publisher}.${manifest.name}`;
     const tmpDir = this.context.globalStorageUri.fsPath;
-    let tmpFile: string | undefined;
-
-    try {
-      const tmpFilePath = path.join(
-        tmpDir,
-        `${extensionId}-preview-${Date.now()}.png`
-      );
-
-      await Promise.all([
-        fs.mkdir(tmpDir, { recursive: true }),
-        fs.writeFile(tmpFilePath, screenshot),
-      ]);
-      tmpFile = tmpFilePath;
-
-      await copyImageToClipboard(tmpFile);
-      await delay(50);
-      await vscode.commands.executeCommand(
-        "editor.action.clipboardPasteAction"
-      );
-      await delay(50);
-    } catch (error) {
-      throw new Error(`Failed to send image: ${error}`);
-    } finally {
-      if (tmpFile) {
-        fs.unlink(tmpFile).catch((error) =>
-          console.error("Failed to clean up temporary file:", error)
-        );
-      }
-    }
-  }
-
-  private async prepareTextForComposer(text: string): Promise<void> {
-    if (!text) {
-      return;
-    }
-
-    await copyTextToClipboard(text);
-    await delay(50);
-    await vscode.commands.executeCommand("editor.action.clipboardPasteAction");
-    await delay(50);
-  }
-
-  private async showSuccessNotification() {
-    await this.toastService.showProgress(
-      "Successfully sent to Composer",
-      async () => {
-        await delay(2000);
-      }
+    const tmpFilePath = path.join(
+      tmpDir,
+      `${extensionId}-preview-${Date.now()}.png`
     );
+
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(tmpFilePath, screenshot);
+    return tmpFilePath;
   }
 
-  private formatLogs(logs: LogData): string {
-    let result = "---Console Logs---\n";
-    logs.console.forEach((log) => {
-      const timestamp = new Date(log.timestamp).toLocaleTimeString();
-      let prefix = "";
+  public async sendLogs(logs: LogData): Promise<void> {
+    await this.openComposer();
+    await this.formatAndSendLogs(logs);
+  }
 
-      switch (log.type) {
-        case "warning":
-          prefix = "[WARN]";
-          break;
-        case "error":
-          prefix = "[ERROR]";
-          break;
-        case "info":
-          prefix = "[INFO]";
-          break;
-        case "debug":
-          prefix = "[DEBUG]";
-          break;
-        case "log":
-        default:
-          prefix = "[LOG]";
-      }
+  public async sendScreenshot(page: puppeteer.Page): Promise<void> {
+    await this.openComposer();
+    const screenshot = await this.captureScreenshot(page);
+    await this.sendToComposer(screenshot, undefined);
+  }
 
-      const formattedArgs = log.args
-        .map((arg) => {
-          if (!arg) return "";
+  public async sendCapture(page: puppeteer.Page, logs: LogData): Promise<void> {
+    await this.openComposer();
+    const screenshot = await this.captureScreenshot(page);
+    await this.sendToComposer(screenshot, logs);
+  }
 
-          if (arg.includes("%c")) {
-            const parts = arg.split("%c");
-            if (parts.length >= 2) {
-              const text = parts[0] || "";
-              const style = parts[1] || "";
-              return (
-                text.trim() +
-                (text.trim() && style ? ` ${style.trim()}` : style.trim())
-              );
-            }
-            return arg;
-          }
-
-          return arg;
-        })
-        .filter(Boolean)
-        .join(" ");
-
-      result += `[${timestamp}] ${prefix} ${formattedArgs}\n`;
+  private async captureScreenshot(page: puppeteer.Page): Promise<Buffer> {
+    const screenshot = await page.screenshot({
+      type: "png",
+      fullPage: true,
+      encoding: "binary",
     });
+    return Buffer.from(screenshot);
+  }
 
-    if (logs.network.length > 0) {
-      result += "\n---Network Requests---\n";
-      logs.network.forEach((log) => {
-        const timestamp = new Date(log.timestamp).toLocaleTimeString();
-        const formattedLog = {
-          url: log.url,
-          status: log.status,
-          ...(log.error && { error: log.error }),
-        };
-        if (formattedLog.error) {
-          result += `[${timestamp}] [FAILED] ${formattedLog.url} (${formattedLog.error})\n`;
-        } else {
-          const statusPrefix = formattedLog.status >= 400 ? "[ERROR]" : "[OK]";
-          result += `[${timestamp}] ${statusPrefix} ${formattedLog.status}: ${formattedLog.url}\n`;
-        }
-      });
-    }
-    return result;
+  private async formatAndSendLogs(logs: LogData): Promise<void> {
+    await this.sendToComposer(undefined, logs);
   }
 }

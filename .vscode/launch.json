@@ -10,11 +10,14 @@
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/test-workspace"
+        "--extensionDevelopmentPath=${workspaceFolder}"
       ],
       "outFiles": ["${workspaceFolder}/dist/**/*.js"],
-      "preLaunchTask": "npm: watch"
+      "preLaunchTask": "npm: watch",
+      "env": {
+        "VSCODE_DEBUG_MODE": "true",
+        "VSCODE_LOG_LEVEL": "trace"
+      }
     }
   ]
 }

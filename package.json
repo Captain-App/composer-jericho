@@ -120,15 +120,15 @@
       "commandPalette": [
         {
           "command": "web-preview.clearLogs",
-          "when": "web-preview:isConnected"
+          "when": "web-preview:browserConnected"
         },
         {
           "command": "web-preview.sendLogs",
-          "when": "web-preview:isConnected"
+          "when": "web-preview:browserConnected"
         },
         {
           "command": "web-preview.sendScreenshot",
-          "when": "web-preview:isConnected"
+          "when": "web-preview:browserConnected"
         }
       ],
       "editor/context": [
@@ -161,7 +161,26 @@
         "id": "web-preview.submenu",
         "label": "Composer Web"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "composer-web-sidebar",
+          "title": "Composer Web",
+          "icon": "assets/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "composer-web-sidebar": [
+        {
+          "id": "composer-web-browser",
+          "name": "Browser Monitor",
+          "type": "webview",
+          "icon": "assets/icon.png"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -175,7 +194,8 @@
     "pretest": "npm run compile && npm run compile-tests",
     "test": "node ./out/test/runTest.js",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "debug:extension": "node scripts/debug.js"
   },
   "devDependencies": {
     "@types/mocha": "^9.1.1",
@@ -193,6 +213,8 @@
     "typescript": "^4.9.5"
   },
   "dependencies": {
+    "@types/node-fetch": "^2.6.12",
+    "node-fetch": "^2.7.0",
     "puppeteer-core": "^24.2.0"
   },
   "npm": {

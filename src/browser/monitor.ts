@@ -16,9 +16,11 @@ export class BrowserMonitor extends EventEmitter {
   private consoleLogs: BrowserLog[] = [];
   private networkLogs: NetworkRequest[] = [];
   private statusBarItem: vscode.StatusBarItem;
-  private isConnected: boolean = false;
+  private _isConnected: boolean = false;
   private configManager: ConfigManager;
   private disconnectEmitter = new vscode.EventEmitter<void>();
+  private connectionStateEmitter = new vscode.EventEmitter<void>();
+  private newLogEmitter = new vscode.EventEmitter<BrowserLog>();
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private toastService: ToastService;
 
@@ -31,7 +33,7 @@ export class BrowserMonitor extends EventEmitter {
     this.statusBarItem.command = "web-preview.smartCapture";
     this.configManager = ConfigManager.getInstance();
     this.toastService = ToastService.getInstance();
-    this.updateStatusBar();
+    this.updateConnectionState();
   }
 
   public static getInstance(): BrowserMonitor {
@@ -42,18 +44,27 @@ export class BrowserMonitor extends EventEmitter {
   }
 
   private updateStatusBar() {
-    if (!this.isConnected) {
+    if (!this._isConnected) {
       this.statusBarItem.text = "$(plug) Connect Browser Tab";
     } else {
       this.statusBarItem.text = `$(eye) Capture Tab Info (${this.activePage?.info.title})`;
     }
-    this.statusBarItem.tooltip = this.isConnected
+    this.statusBarItem.tooltip = this._isConnected
       ? `Connected to: ${this.activePage?.info.url}`
       : "Click to connect to a browser tab";
     this.statusBarItem.show();
   }
 
+  private updateConnectionState() {
+    console.log("Updating connection state:", { isConnected: this._isConnected, hasActivePage: this.activePage !== null });
+    this._isConnected = this.activePage !== null;
+    vscode.commands.executeCommand("setContext", "web-preview:browserConnected", this._isConnected);
+    this.connectionStateEmitter.fire();
+    this.updateStatusBar();
+  }
+
   public async connect(): Promise<void> {
+    console.log("Attempting to connect to browser...");
     const debugUrl = this.configManager.get<string>("remoteDebuggingUrl");
 
     try {
@@ -62,8 +73,10 @@ export class BrowserMonitor extends EventEmitter {
         browserURL: debugUrl,
         defaultViewport: null,
       });
+      console.log("Connected to browser, getting pages...");
 
       const pages = await this.browser.pages();
+      console.log("Found pages:", pages.length);
       if (!pages?.length) {
         throw new Error(
           "No open pages found. Please open at least one tab in Chrome."
@@ -88,6 +101,7 @@ export class BrowserMonitor extends EventEmitter {
           };
         })
       );
+      console.log("Page options:", picks.map(p => ({ label: p.label, url: p.description })));
 
       const selection = await vscode.window.showQuickPick(picks, {
         placeHolder: "Select the webpage to monitor",
@@ -95,13 +109,16 @@ export class BrowserMonitor extends EventEmitter {
       });
 
       if (!selection) {
+        console.log("No page selected, aborting connection");
         return;
       }
 
+      console.log("Selected page:", selection.info);
       await this.monitorPage(selection.page, selection.info);
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
+      console.error("Connection error:", errorMessage);
       this.toastService.showError(`Failed to connect: ${errorMessage}`);
       this.disconnect();
     }
@@ -128,7 +145,7 @@ export class BrowserMonitor extends EventEmitter {
     }
 
     this.activePage = { page, client, info: pageInfo };
-    this.isConnected = true;
+    this.updateConnectionState();
 
     // Set up console log capture
     await page.evaluate(() => {
@@ -166,6 +183,7 @@ export class BrowserMonitor extends EventEmitter {
     }, 5 * 60 * 1000);
 
     client.on("Runtime.consoleAPICalled", (e) => {
+      console.log("Console API called:", { type: e.type, args: e.args });
       const formattedArgs = e.args.map((arg) => {
         if (arg.type === "object" && arg.preview) {
           if (arg.preview.subtype === "array") {
@@ -217,56 +235,34 @@ export class BrowserMonitor extends EventEmitter {
         }
       });
 
-      // Special handling for console.table
-      if (e.type === "table") {
-        const arg = e.args[0];
-        if (arg.preview && arg.preview.properties) {
-          const values = arg.preview.properties.map((p) => p.value);
-          formattedArgs.push("\n" + values.join("\n"));
-        }
-      }
-
-      // Special handling for console.trace
-      if (e.type === "trace" && e.stackTrace) {
-        const frames = Array.isArray(e.stackTrace)
-          ? e.stackTrace
-          : [e.stackTrace];
-        const trace = frames
-          .map((frame) => ({
-            functionName: frame.functionName || "(anonymous)",
-            url: frame.url || "",
-            lineNumber: frame.lineNumber || 0,
-            columnNumber: frame.columnNumber || 0,
-          }))
-          .map(
-            (frame) =>
-              `    at ${frame.functionName} (${frame.url}:${frame.lineNumber}:${frame.columnNumber})`
-          )
-          .join("\n");
-
-        if (trace) {
-          formattedArgs[0] = `Trace: ${formattedArgs[0] || "console.trace"}`;
-          formattedArgs.push(`\n${trace}`);
-        }
-      }
+      const logType = e.type === "warning" ? "warn" : 
+                     (e.type === "debug" || e.type === "log" || e.type === "info" || e.type === "error") ? e.type : "log";
 
       const log: BrowserLog = {
-        type: e.type,
-        args: formattedArgs,
+        type: logType,
+        text: formattedArgs.join(" "),
         timestamp: Date.now(),
       };
+      
+      console.log("Emitting console log:", log);
       this.consoleLogs.push(log);
-      this.emit("console", log);
+      this.newLogEmitter.fire(log);
     });
 
     client.on("Log.entryAdded", (e) => {
+      console.log("Log entry added:", e.entry);
+      const logType = e.entry.level === "warning" ? "warn" :
+                     (e.entry.level === "error" || e.entry.level === "info") ? e.entry.level : "log";
+                     
       const log: BrowserLog = {
-        type: e.entry.level,
-        args: [e.entry.text],
+        type: logType,
+        text: e.entry.text,
         timestamp: Date.now(),
       };
+      
+      console.log("Emitting log entry:", log);
       this.consoleLogs.push(log);
-      this.emit("console", log);
+      this.newLogEmitter.fire(log);
     });
 
     client.on("Network.responseReceived", (e) => {
@@ -305,14 +301,14 @@ export class BrowserMonitor extends EventEmitter {
   }
 
   private async handleSessionError() {
-    if (this.isConnected) {
+    if (this._isConnected) {
       this.toastService.showSessionDisconnected();
       await this.disconnect();
     }
   }
 
   private async handlePageClosed() {
-    if (this.isConnected) {
+    if (this._isConnected) {
       this.toastService.showTabClosed();
       await this.disconnect();
     }
@@ -334,8 +330,7 @@ export class BrowserMonitor extends EventEmitter {
       await this.browser.disconnect().catch(() => {});
       this.browser = null;
     }
-    this.isConnected = false;
-    this.updateStatusBar();
+    this.updateConnectionState();
     this.disconnectEmitter.fire();
   }
 
@@ -359,8 +354,8 @@ export class BrowserMonitor extends EventEmitter {
     };
   }
 
-  public isPageConnected(): boolean {
-    return this.isConnected;
+  public isConnected(): boolean {
+    return this._isConnected;
   }
 
   public dispose() {
@@ -388,5 +383,13 @@ export class BrowserMonitor extends EventEmitter {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
     }
+  }
+
+  public onConnectionStateChange(listener: () => void): vscode.Disposable {
+    return this.connectionStateEmitter.event(listener);
+  }
+
+  public onNewLog(listener: (log: BrowserLog) => void): vscode.Disposable {
+    return this.newLogEmitter.event(listener);
   }
 }
