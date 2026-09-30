@@ -1,0 +1,16 @@
+# Backstage catalog entry — discovered by https://backstage.captainapp.co.uk
+# (captain-k3s GitHub App). Edit freely: type, lifecycle, system, owner, links.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: composer-jericho
+  description: "Cursor extension that forwards frontend errors and screenshots to composer in one-click, making development seamless for you"
+  annotations:
+    github.com/project-slug: Captain-App/composer-jericho
+  tags:
+    - fork
+    - typescript
+spec:
+  type: service
+  lifecycle: deprecated
+  owner: group:default/captain-app
